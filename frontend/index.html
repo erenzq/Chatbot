@@ -169,7 +169,7 @@
         setStatus("📤 Lade Logs hoch...");
 
         try {
-            const res = await fetch("http://127.0.0.1:8001/upload_logs", {
+            const res = await fetch("http://127.0.0.1:8008/upload_logs", {
                 method: "POST",
                 body: formData
             });
@@ -210,7 +210,7 @@
         setStatus("🤖 Denke nach...");
 
         try {
-            const res = await fetch("http://127.0.0.1:8001/ask_ai_stream", {
+            const res = await fetch("http://127.0.0.1:8008/ask_ai_stream", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"

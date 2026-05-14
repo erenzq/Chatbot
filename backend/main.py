@@ -1,15 +1,13 @@
 import os
+from collections import Counter
 from typing import List
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi import UploadFile, File
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
-from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam, \
-    ChatCompletionAssistantMessageParam
 from pydantic import BaseModel
 
 load_dotenv()
@@ -20,6 +18,7 @@ client = OpenAI(
 )
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,26 +29,12 @@ app.add_middleware(
 
 log_embeddings = []
 log_texts = []
+parsed_logs = []
 
 
 class ChatRequest(BaseModel):
     question: str
-    history: List[dict]
-
-
-def initialize_embeddings(filepath):
-    global log_embeddings, log_texts
-
-    log_embeddings = []
-    log_texts = []
-
-    with open(filepath, "r") as file:
-        for line in file:
-            log_text = line.strip()
-            embedding = get_embedding(log_text)
-
-            log_texts.append(log_text)
-            log_embeddings.append(embedding)
+    history: List[dict] = []
 
 
 def get_embedding(text):
@@ -65,6 +50,9 @@ def cosine_similarity(a, b):
 
 
 def get_relevant_logs_embeddings(question, top_k=3):
+    if not log_embeddings:
+        return "Keine Logs geladen."
+
     question_embedding = get_embedding(question)
 
     scored_logs = []
@@ -76,18 +64,50 @@ def get_relevant_logs_embeddings(question, top_k=3):
     scored_logs.sort(key=lambda x: x[1], reverse=True)
     top_logs = [log for log, _ in scored_logs[:top_k]]
 
-    formatted = ""
-
-    for i, log in enumerate(top_logs, 1):
-        formatted += f"{i}. {log}\n"
-
-    return formatted
+    return "\n".join(f"{i + 1}. {log}" for i, log in enumerate(top_logs))
 
 
-@app.post("/ask_ai_stream")
-def ask_ai_stream(request: ChatRequest):
-    context = get_relevant_logs_embeddings(request.question)
-    system_msg: ChatCompletionSystemMessageParam = {
+def parse_log(line):
+    parts = line.split(":")
+
+    if len(parts) >= 2:
+        level = parts[0].strip()
+        message = parts[1].strip()
+    else:
+        level = "UNKNOWN"
+        message = line.strip()
+
+    return {
+        "level": level,
+        "message": message
+    }
+
+
+def get_log_stats():
+    if not parsed_logs:
+        return {}
+
+    levels = [log["level"] for log in parsed_logs]
+    return dict(Counter(levels))
+
+
+def build_messages(question, history):
+    context = get_relevant_logs_embeddings(question)
+    stats = get_log_stats()
+    root_causes = get_root_causes()
+    semantic_causes = get_semantic_root_causes()
+    max_history = 5
+
+    history_messages = [
+        {
+            "role": entry.get("role", "user"),
+            "content": entry.get("content", "")
+        }
+        for entry in (history or [])[-max_history:]
+        if entry.get("content")
+    ]
+
+    system_msg = {
         "role": "system",
         "content": (
             "Du bist ein Experte für Fahrzeug-Logs.\n"
@@ -99,30 +119,81 @@ def ask_ai_stream(request: ChatRequest):
             "Lösung:\n"
         )
     }
-    max_history = 5
-    history_messages = []
 
-    for entry in request.history:
-        if entry["role"] == "user":
-            history_messages.append(ChatCompletionUserMessageParam(
-                role="user",
-                content=entry["content"]
-            ))
-        elif entry["role"] == "assistant":
-            history_messages.append(ChatCompletionAssistantMessageParam(
-                role="assistant",
-                content=entry["content"]
-            ))
-    user_msg: ChatCompletionUserMessageParam = {
+    user_msg = {
         "role": "user",
         "content": (
-            "Hier sind relevante Logs:\n"
-            f"{context}\n\n"
-            "Beantworte folgende Frage basierend darauf:\n"
-            f"{request.question}"
+            f"Log Statistiken:\n{stats}\n\n"
+            f"Häufigste Probleme:\n{root_causes}\n\n"
+            f"Semantische Ursachen:\n{semantic_causes}\n\n"
+            f"Relevante Logs:\n{context}\n\n"
+            f"Frage:\n{question}"
         )
     }
-    messages = [system_msg] + history_messages[-max_history:] + [user_msg]
+
+    messages = [system_msg]
+    messages.extend(history_messages)
+    messages.append(user_msg)
+
+    return messages
+
+
+def get_root_causes(top_k=3):
+    if not parsed_logs:
+        return []
+
+    messages = [log["message"] for log in parsed_logs]
+
+    counter = Counter(messages)
+
+    most_common = counter.most_common(top_k)
+
+    return most_common
+
+
+def get_semantic_root_causes(threshold=0.8):
+    if not parsed_logs:
+        return []
+
+    clusters = []
+
+    for log in parsed_logs:
+        message = log["message"]
+        emb = get_embedding(message)
+
+        found_cluster = False
+
+        for cluster in clusters:
+            similarity = cosine_similarity(emb, cluster["embedding"])
+
+            if similarity > threshold:
+                cluster["messages"].append(message)
+                cluster["count"] += 1
+                found_cluster = True
+                break
+
+        if not found_cluster:
+            clusters.append({
+                "embedding": emb,
+                "messages": [message],
+                "count": 1
+            })
+
+    clusters.sort(key=lambda x: x["count"], reverse=True)
+    result = []
+
+    for cluster in clusters[:3]:
+        result.append({
+            "example": cluster["messages"][0],
+            "count": cluster["count"]
+        })
+
+    return result
+
+
+@app.post("/ask_ai_stream")
+def ask_ai_stream(request: ChatRequest):
+    messages = build_messages(request.question, request.history)
 
     def generate():
         response = client.chat.completions.create(
@@ -137,24 +208,60 @@ def ask_ai_stream(request: ChatRequest):
     return StreamingResponse(generate(), media_type="text/plain")
 
 
+@app.post("/ask_ai")
+def ask_ai(request: ChatRequest):
+    messages = build_messages(request.question, request.history)
+
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=messages
+    )
+
+    answer = response.choices[0].message.content
+    return {"answer": answer}
+
+
 @app.post("/upload_logs")
 def upload_logs(file: UploadFile = File(...)):
-    global log_embeddings, log_texts
+    global log_embeddings, log_texts, parsed_logs
 
     log_embeddings = []
     log_texts = []
+    parsed_logs = []
 
     content = file.file.read().decode("utf-8")
     lines = content.splitlines()
 
     for line in lines:
         log_text = line.strip()
+
         if log_text:
+            parsed_logs.append(parse_log(log_text))
+
             embedding = get_embedding(log_text)
             log_texts.append(log_text)
             log_embeddings.append(embedding)
 
-    return {"message": f"Successfully uploaded and processed {len(log_texts)} logs."}
+    return {"message": f"{len(log_texts)} logs uploaded successfully."}
+
+
+def initialize_embeddings(filepath):
+    global log_embeddings, log_texts, parsed_logs
+
+    log_embeddings = []
+    log_texts = []
+    parsed_logs = []
+
+    with open(filepath, "r") as file:
+        for line in file:
+            log_text = line.strip()
+
+            if log_text:
+                parsed_logs.append(parse_log(log_text))
+
+                embedding = get_embedding(log_text)
+                log_texts.append(log_text)
+                log_embeddings.append(embedding)
 
 
 initialize_embeddings("log.txt")
