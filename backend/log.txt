@@ -1,0 +1,5 @@
+Error: Sensor failure
+Warning: Low battery
+Error: Camera disconnected
+Info: System running
+Error: Overheating detected
