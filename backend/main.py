@@ -91,11 +91,32 @@ def get_log_stats():
     return dict(Counter(levels))
 
 
+def compute_confidence():
+    if not parsed_logs:
+        return 0.0
+
+    clusters = get_semantic_root_causes()
+
+    if not clusters:
+        return 0.0
+
+    total_logs = len(parsed_logs)
+    top_cluster_count = clusters[0]["count"]
+    num_clusters = len(clusters)
+
+    base_conf = top_cluster_count / total_logs
+    penalty = min(num_clusters / 10, 0.5)
+    confidence = base_conf * (1 - penalty)
+    return round(confidence, 2)
+
+
 def build_messages(question, history):
     context = get_relevant_logs_embeddings(question)
     stats = get_log_stats()
     root_causes = get_root_causes()
     semantic_causes = get_semantic_root_causes()
+    confidence = compute_confidence()
+    transitions = get_top_transitions()
     max_history = 5
 
     history_messages = [
@@ -117,6 +138,7 @@ def build_messages(question, history):
             "Problem:\n"
             "Ursache:\n"
             "Lösung:\n"
+            "Confidence:\n"
         )
     }
 
@@ -126,8 +148,10 @@ def build_messages(question, history):
             f"Log Statistiken:\n{stats}\n\n"
             f"Häufigste Probleme:\n{root_causes}\n\n"
             f"Semantische Ursachen:\n{semantic_causes}\n\n"
+            f"Confidence Score: {confidence}\n\n"
             f"Relevante Logs:\n{context}\n\n"
             f"Frage:\n{question}"
+            f"Typische Fehler-Abfolgen:\n{transitions}\n\n"
         )
     }
 
@@ -188,6 +212,37 @@ def get_semantic_root_causes(threshold=0.8):
             "count": cluster["count"]
         })
 
+    return result
+
+
+def get_error_transitions():
+    transitions = {}
+
+    for i in range(len(parsed_logs) - 1):
+        current = parsed_logs[i]["message"]
+        next_log = parsed_logs[i + 1]["message"]
+
+        key = (current, next_log)
+
+        if key not in transitions:
+            transitions[key] = 0
+
+        transitions[key] += 1
+
+    return transitions
+
+
+def get_top_transitions(top_k=3):
+    transitions = get_error_transitions()
+    sorted_transitions = sorted(transitions.items(), key=lambda x: x[1], reverse=True)
+
+    result = []
+    for (current, next_log), count in sorted_transitions[:top_k]:
+        result.append({
+            "from": current,
+            "to": next_log,
+            "count": count
+        })
     return result
 
 
