@@ -33,6 +33,7 @@ app.add_middleware(
 log_embeddings = []
 log_texts = []
 parsed_logs = []
+embedding_cache = {}
 
 
 class ChatRequest(BaseModel):
@@ -45,11 +46,15 @@ class ChatRequest(BaseModel):
 # -------------------------
 
 def get_embedding(text):
+    if text in embedding_cache:
+        return embedding_cache[text]
     response = client.embeddings.create(
         model="Qwen/Qwen3-Embedding-8B",
         input=text
     )
-    return np.array(response.data[0].embedding)
+    embedding = np.array(response.data[0].embedding)
+    embedding_cache[text] = embedding
+    return embedding
 
 
 def cosine_similarity(a, b):
